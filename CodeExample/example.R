@@ -1,6 +1,9 @@
 library(ggplot2)
 library(gridExtra)
 library(grid)
+library(dplyr)
+library(ggmap)
+library(sp)
 
 p1 <- ggplot(iris, aes(x=Sepal.Length, y = Petal.Length, col=Species))+geom_point()
 p2 <- ggplot(iris, aes(x=Sepal.Width, y = Petal.Length, col=Species))+geom_point()
