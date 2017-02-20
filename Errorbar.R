@@ -1,4 +1,5 @@
 
+library(ggplot2)
 ##Make same plot sorted by region in a certain order and also sort by pollutant (CO comes top) ########################
 df=data.frame(c(0.91,1.09,1.06,0.97,1.02,1.12,0.85,1.00),c(0.86,1.02,1.03,0.91,0.91,1.05,0.81,0.95),c(0.97,1.17,1.10,1.03,1.13,1.20,0.90,1.05))
 #name column
@@ -19,3 +20,4 @@ ggplot(data=df,aes(x=Pol,y=Point,quality,fill=region,colour=region))+
 	scale_x_discrete(limits=rev(levels(df$Pol)))+
 	ggtitle('Estimated RR per IQR increment')+
 	guides(fill=FALSE,colour=guide_legend(reverse=TRUE))
+
