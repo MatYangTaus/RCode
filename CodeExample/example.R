@@ -13,7 +13,7 @@ p4 <- ggplot(iris, aes(x=Sepal.Length, y = Petal.Width, col=Species))+geom_point
 
 grid.arrange(p1, p2, p3, p4,nrow=2)
 
-
+## comment ### 
 p1 <- p1+theme(legend.position = "none")
 p2 <- p2+theme(legend.position = "none")
 p3 <- p3+theme(legend.position = "none")
