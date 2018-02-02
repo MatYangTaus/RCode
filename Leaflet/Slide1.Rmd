@@ -1,0 +1,269 @@
+---
+title: "Document"
+author: "KE"
+date: "February 2, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r cars}
+library(tidyverse)
+library(rvest)
+library(sf)
+library(tidycensus)
+library(tmap)
+
+# nys health data lives here
+health_web <- "https://www.health.ny.gov/statistics/vital_statistics/2015/"
+
+# each parameter lives in a table on a different page
+pop <- read_html(paste0(health_web, "table01a.htm"))
+birth <- read_html(paste0(health_web, "table07.htm"))
+abort <- read_html(paste0(health_web, "table21.htm"))
+
+# define a function to find and parse the table node,
+# select the columns i need, and make it into a tibble
+# thankfully, the table formatting is the same on each page
+read_nys_xml_table <- function(x) {
+  html_nodes(x, "table") %>%
+    html_table(fill = TRUE) %>%
+    as.data.frame() %>% # i'm not sure why i can't coerce directly to tibble
+    as_tibble() %>%
+    slice(-(c(1:5, 11:12)))
+}
+
+# parse and clean population
+population <- read_nys_xml_table(pop) %>%
+  transmute(
+    county = County,
+    pop_wra = as.integer(str_replace(Var.2, ",", ""))
+  ) %>%
+  # combine essex/hamilton counties
+  add_row(
+    county = "Essex/Hamilton",
+    pop_wra = sum(.$pop_wra[.$county %in% c("Essex", "Hamilton")])
+  ) %>%
+  filter(!county %in% c("Essex", "Hamilton"))
+
+# parse and clean live births
+live_births <- read_nys_xml_table(birth) %>%
+  transmute(
+    county = County,
+    live_births = as.integer(str_replace(Var.2, ",", ""))
+  ) %>%
+  # combine essex/hamilton counties
+  add_row(
+    county = "Essex/Hamilton",
+    live_births = sum(.$live_births[.$county %in% c("Essex", "Hamilton")])
+  ) %>%
+  filter(!county %in% c("Essex", "Hamilton"))
+
+# parse and clean abortions
+abortions <- read_nys_xml_table(abort) %>%
+  transmute(
+    county = County,
+    abortions = as.integer(str_replace(Var.2, ",", ""))
+  ) %>%
+  # essex/hamilton is already aggregated here, but repeated as hamilton/essex
+  filter(county != "Hamilton/Essex")
+
+# let's print one tibble to make sure it looks right
+live_births
+```
+
+## Including Plots
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+# join scraped data, calculate rates and total pregnant women
+preg_rate <- reduce(list(population, live_births, abortions), left_join) %>%
+  mutate(
+    fertility_rate = (live_births / pop_wra) * 1000,
+    abortion_rate = (abortions / pop_wra) * 1000,
+    fetal_loss_rate = 17.9, # national rate per cdc
+    preg_tot = as.integer((pop_wra / 1000) *
+      (
+        (fertility_rate * 0.75)
+        + (abortion_rate * 0.167)
+          + (fetal_loss_rate * 0.25)
+      ))
+  ) %>%
+  # rename to join with census data later
+  mutate(county = recode(county, "St Lawrence" = "St. Lawrence"))
+preg_rate
+```
+
+```{r include=FALSE}
+tidycensus::census_api_key("bb7f3b3b1ffecc9dca54db6ac7b65e7586c959dc")
+
+
+# download acs 5 year estimates
+acs_pop <- get_acs(
+  state = "NY",
+  geography = "county",
+  variables = "B01001_026", # female pop
+  survey = "acs5",
+  summary_var = "B01001_001", # total pop
+  year = 2016,
+  geometry = TRUE
+)
+
+# clean up county names for joining and rename vars
+fem_pop <- acs_pop %>%
+  mutate(county = str_replace(NAME, "\\ County.*", "")) %>%
+  select(county, pop_tot = summary_est, pop_fem = estimate)
+
+# calculate combined populations for essex and hamilton counties
+esx_ham <- fem_pop %>%
+  filter(county %in% c("Essex", "Hamilton")) %>%
+  summarise(
+    county = "Essex/Hamilton",
+    pop_tot = sum(pop_tot),
+    pop_fem = sum(pop_fem)
+  )
+
+# add essex/hamilton row and join with dept of health rates
+# calc pregnant women as a proportion of female pop, total pop, and wra pop
+preg_sf <- rbind(fem_pop, esx_ham) %>%
+  filter(!county %in% c("Essex", "Hamilton")) %>%
+  left_join(preg_rate) %>%
+  mutate(
+    preg_fem_prop = preg_tot / pop_fem,
+    preg_wra_prop = preg_tot / pop_wra,
+    preg_tot_prop = preg_tot / pop_tot
+  )
+
+
+
+```
+
+```{r}
+preg_sf %>% select(1:4)
+ 
+preg <- preg_sf %>%
+  st_set_geometry(NULL) %>%
+  as_data_frame()
+
+# totals for whole state
+preg %>% summarize(
+  total_preg = sum(preg_tot),
+  total_wra = sum(pop_wra),
+  total_fem = sum(pop_fem),
+  total_pop = sum(pop_tot)
+)
+```
+
+```{r}
+ggplot(preg, aes(x = reorder(county, preg_wra_prop), y = preg_wra_prop)) +
+  geom_col(color = "royalblue", width = 0.08) +
+  geom_point(color = "royalblue", size = 1.5) +
+  labs(
+    title = paste0(
+      "Percentage of women of reproductive age (15 – 44)\n",
+      "who are pregnant in New York State by county"
+    ),
+    y = "Percent pregnant",
+    x = "",
+    caption = paste(
+      "Source: NYS Department of Health Vital Statistics,",
+      "2015, Tables 1a, 7, and 21\nCDC National Vital",
+      "Statistics, Pregnancy Outcomes for the US,",
+      "2008, Table 1\nUS Census Bureau, American Community",
+      "Survey, 2012 - 2016, Table B01001"
+    )
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 7, angle = 60, vjust = 0.5),
+    axis.title.y = element_blank(),
+    plot.caption = element_text(size = 7, face = "italic"),
+    panel.grid.major.x = element_blank()
+  ) +
+  scale_y_continuous(labels = scales::percent) 
+```
+
+```{r}
+# randomly sample dots - 1 per 50 pregnant women by county
+dots <- preg_sf %>%
+  st_sample(size = .$preg_tot / 50)
+
+# make a map of dots and county polygons
+tm_shape(preg_sf) +
+  tm_borders(col = "darkgray") +
+  tm_shape(dots) +
+  tm_dots(col = "royalblue", size = 0.015) +
+  tm_add_legend(
+    type = "symbol",
+    labels = " 1 dot = 50 pregnant women",
+    size = 0.05,
+    shape = 19,
+    col = "royalblue"
+  ) +
+  tm_layout(
+    main.title = "Dot-density map of pregnant women\nin New York State, 2015",
+    main.title.size = 1.2,
+    frame = FALSE,
+    legend.position = c(0.01, 0.17),
+    legend.text.size = 1
+  ) +
+  tm_credits(
+    text = paste(
+      "Source: NYS Department of Health Vital Statistics,",
+      "2015, Tables 1a, 7, and 21\nCDC National Vital",
+      "Statistics, Pregnancy Outcomes for the US,",
+      "2008, Table 1\nUS Census Bureau, American Community",
+      "Survey, 2012 - 2016, Table B01001"
+    ),
+    size = 0.5,
+    fontface = "italic",
+    align = "left",
+    position = c(0.01, 0.02)
+  )
+```
+```{r}
+# change tmap to interactive mode
+tmap_mode("view")
+
+# define a little helper function to format percentages
+make_pct <- function(x, digits = 1) {
+  paste0(formatC(x * 100, digits = digits, format = "f"), "%")
+}
+
+# make that map
+tm_shape(preg_sf) +
+  tm_fill(
+    col = "preg_wra_prop", # define fill variable
+    palette = "GnBu", # pick a pretty color palette
+    contrast = c(0.2, 0.8), # modify starting and ending contrast of colors
+    n = 5, # choose 5 bins
+    style = "jenks", # use natural breaks to pick bins
+    title = "Pregnancy Rate",
+    legend.format = list(fun = make_pct),
+    popup.vars = c(
+      "Pregnant Women" = "preg_tot",
+      "Percent Pregnant of WRA" = "preg_wra_prop",
+      "Total Female Population" = "pop_fem",
+      "Women of Reproductive Age (WRA)" = "pop_wra",
+      "Total Population" = "pop_tot",
+      "Abortion Rate (per 1,000 WRA)" = "abortion_rate",
+      "Birth Rate (per 1,000 WRA)" = "fertility_rate",
+      "Fetal Loss Rate (per 1,000 WRA)" = "fetal_loss_rate"
+    ),
+    id = "county",
+    popup.format = list(
+      preg_tot = list(format = "f"),
+      preg_wra_prop = list(fun = make_pct),
+      pop_fem = list(format = "f"),
+      pop_wra = list(format = "f"),
+      pop_tot = list(format = "f"),
+      abortion_rate = list(format = "f", digits = 1),
+      fertility_rate = list(format = "f", digits = 1),
+      fetal_loss_rate = list(format = "f", digits = 1)
+    )
+  ) +
+  tm_borders(col = "darkgray")
+```
+
